@@ -1,0 +1,55 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+.idea/
+
+# CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+
+# IDE specific files
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Project binary
+GBatividade
+
+# Dependencies (if you want to ignore them)
+# Uncomment if you want to track dependencies in source control
+# include/
+# lib/
+
+# Generated files
+*.log
+*.tlog
