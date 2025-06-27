@@ -2,6 +2,8 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #define STB_IMAGE_IMPLEMENTATION
+#include <fstream>
+#include <sstream>
 #include <stb_image.h>
 #include <vector>
 #include <glm/glm.hpp>
@@ -11,542 +13,474 @@
 using namespace std;
 using namespace glm;
 
-struct Sprite {
+struct Tile {
     GLuint VAO;
     GLuint texID;
+    GLint iTile;
     vec3 position;
     vec3 dimensions;
     GLfloat ds, dt;
-    GLint iAnimation, iFrame;
-    GLint nAnimations, nFrames;
-};
-
-struct Tile {
-    GLuint VAO;
-    GLuint texID; // de qual tileset
-    GLint iTile; //indice dele no tileset
-    vec3 position;
-    vec3 dimensions; //tamanho do losango 2:1
-    GLfloat ds, dt;
     GLboolean caminhavel;
-    //int iAnimation, iFrame;
-    //int nAnimations, nFrames;
 };
 
-void key_callback(GLFWwindow *window, int key, int scancode, int action, int mode);
+class Window {
+private:
+    GLFWwindow *window;
+    const GLuint width;
+    const GLuint height;
 
-int setupShader();
-int setupSprite(int nAnimations, int nFrames, float &ds, float &dt);
-int setupTile(int nTiles, float &ds, float &dt);
-int loadTexture(string filePath, int &width, int &height);
-void desenharMapa(GLuint shaderID);
-void desenharPersonagem(GLuint shaderID);
+public:
+    Window(GLuint width, GLuint height, const GLchar *title) : width(width), height(height) {
+        glfwInit();
+        glfwWindowHint(GLFW_SAMPLES, 8);
 
-const GLuint WIDTH = 800, HEIGHT = 600;
+        window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+        if (!window) {
+            throw runtime_error("Falha ao criar a janela GLFW");
+        }
 
-#define TILEMAP_WIDTH 3
-#define TILEMAP_HEIGHT 3
-int map[3][3] = {
-    1, 1, 4,
-    4, 1, 4,
-    4, 4, 1
+        glfwMakeContextCurrent(window);
+
+        if (!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress)) {
+            throw runtime_error("Falha ao inicializar GLAD");
+        }
+
+        GLint fbWidth, fbHeight;
+        glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+        glViewport(0, 0, fbWidth, fbHeight);
+    }
+
+    ~Window() {
+        glfwDestroyWindow(window);
+        glfwTerminate();
+    }
+
+    GLboolean shouldClose() const {
+        return glfwWindowShouldClose(window);
+    }
+
+    GLvoid swapBuffers() const {
+        glfwSwapBuffers(window);
+    }
+
+    GLFWwindow *getHandle() const {
+        return window;
+    }
 };
 
-std::vector <Tile> tileset;
+class Shader {
+private:
+    GLuint ID;
+    static constexpr const char *PROGRAM_LINK_ERROR = "ERROR::SHADER::PROGRAM::LINKING_FAILED\n";
 
-vec2 pos;
+public:
+    Shader(const GLchar *vertexPath, const GLchar *fragmentPath) {
+        ID = createShaderProgram(vertexPath, fragmentPath);
+    }
+
+    ~Shader() {
+        glDeleteProgram(ID);
+    }
+
+    void use() const {
+        glUseProgram(ID);
+    }
+
+    void setMat4(const GLchar *name, const mat4 &matrix) const {
+        GLint location = glGetUniformLocation(ID, name);
+        glUniformMatrix4fv(location, 1, GL_FALSE, value_ptr(matrix));
+    }
+
+    GLuint getProgram() const {
+        return ID;
+    }
+
+private:
+    string readShaderFile(const string &path) const {
+        ifstream shaderFile(path);
+        if (!shaderFile.is_open()) {
+            throw runtime_error("Falha ao abrir o arquivo de shader " + path);
+        }
+
+        stringstream shaderStream;
+        shaderStream << shaderFile.rdbuf();
+        shaderFile.close();
+
+        return shaderStream.str();
+    }
+
+    GLuint compileShader(const string &source, GLenum type) {
+        GLuint shader = glCreateShader(type);
+        const GLchar *sourcePtr = source.c_str();
+        glShaderSource(shader, 1, &sourcePtr, NULL);
+        glCompileShader(shader);
+
+        GLint success;
+        GLchar infoLog[512];
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            glGetShaderInfoLog(shader, sizeof(infoLog), nullptr, infoLog);
+            string shaderTypeName = (type == GL_VERTEX_SHADER) ? "VERTEX" : "FRAGMENT";
+            cerr << "Shader source: " << source << endl;
+            throw runtime_error("ERROR::SHADER::" + shaderTypeName + "::COMPILATION_FAILED\n" + infoLog);
+        }
+
+        return shader;
+    }
+
+    void checkProgramLinkStatus(GLuint program) {
+        GLint success;
+        GLchar infoLog[512];
+        glGetProgramiv(program, GL_LINK_STATUS, &success);
+        if (!success) {
+            glGetProgramInfoLog(program, sizeof(infoLog), nullptr, infoLog);
+            throw runtime_error(string(PROGRAM_LINK_ERROR) + infoLog);
+        }
+    }
+
+    GLuint createShaderProgram(const GLchar *vertexPath, const GLchar *fragmentPath) {
+        string vertexCode = readShaderFile(vertexPath);
+        string fragmentCode = readShaderFile(fragmentPath);
+
+        GLuint vertexShader = compileShader(vertexCode, GL_VERTEX_SHADER);
+        GLuint fragmentShader = compileShader(fragmentCode, GL_FRAGMENT_SHADER);
+
+        GLuint shaderProgram = glCreateProgram();
+        glAttachShader(shaderProgram, vertexShader);
+        glAttachShader(shaderProgram, fragmentShader);
+        glLinkProgram(shaderProgram);
+
+        checkProgramLinkStatus(shaderProgram);
+
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+
+        return shaderProgram;
+    }
+};
+
+class TileMap {
+private:
+    static constexpr int TILEMAP_WIDTH = 3;
+    static constexpr int TILEMAP_HEIGHT = 3;
+
+    vector<Tile> tileset;
+    int map[TILEMAP_HEIGHT][TILEMAP_WIDTH];
+    GLuint textID;
+
+public:
+    TileMap(const string &tilesetPath) {
+        int imgWidth, imgHeight;
+        textID = loadTexture(tilesetPath, imgWidth, imgHeight);
+
+        initializeTileset();
+
+        initializeMap();
+    }
+
+    GLint getHeight() const {
+        return TILEMAP_HEIGHT;
+    }
+
+    GLint getWidth() const {
+        return TILEMAP_WIDTH;
+    }
+
+    vector<Tile> getTileset() const {
+        return tileset;
+    }
+
+    const int *operator[](int index) const {
+        return map[index];
+    }
+
+    GLvoid draw(const Shader &shader) const {
+        float x0 = 400.0f;
+        float yo = 100.0f;
+
+        for (int i = 0; i < TILEMAP_HEIGHT; i++) {
+            for (int j = 0; j < TILEMAP_WIDTH; j++) {
+                cout << "Drawing tile at i=" << i << ", j=" << j << endl;
+
+                int tileIndex = map[i][j];
+                if (tileIndex >= tileset.size()) {
+                    cout << "Tile index out of range" << tileIndex << endl;
+                    continue;
+                }
+
+                Tile currentTile = tileset[tileIndex];
+
+                // Calculate isometric position
+                float x = x0 + (j - i) * currentTile.dimensions.x / 2.0f;
+                float y = yo + (j + i) * currentTile.dimensions.y / 2.0f;
+
+                // Create model matrix
+                mat4 model(1.0f);
+                model = translate(model, vec3(x, y, 0.0f));
+                model = scale(model, currentTile.dimensions);
+
+                //Set uniforms
+                shader.setMat4("model", model);
+                glUniform2f(glGetUniformLocation(shader.getProgram(), "offsetTex"),
+                            currentTile.iTile * currentTile.ds, 0.0f);
+
+                glBindVertexArray(currentTile.VAO);
+                glBindTexture(GL_TEXTURE_2D, currentTile.texID);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            }
+        }
+        cout << "Finished drawing map" << endl;
+    }
+
+    GLboolean isWalkable(int x, int y) const {
+        if (x < 0 || x >= TILEMAP_WIDTH || y < 0 || y >= TILEMAP_HEIGHT) {
+            return false;
+        }
+        return tileset[map[y][x]].caminhavel;
+    }
+
+private:
+    GLvoid initializeTileset() {
+        cout << "Initializing tileset..." << endl;
+        tileset.clear();
+        for (int i = 0; i < 7; i++) {
+            Tile tile;
+            tile.dimensions = vec3(114, 57, 1.0);
+            tile.iTile = i;
+            tile.texID = textID;
+            tile.VAO = setupTile(7, tile.ds, tile.dt);
+            tile.caminhavel = true;
+            tileset.push_back(tile);
+            cout << "Tile " << i << " with ds=" << tile.ds << " dt=" << tile.dt << endl;
+        }
+        tileset[4].caminhavel = false; //agua
+        cout << "Tileset initialization complete. Total tiles: " << tileset.size() << endl;
+    }
+
+    GLvoid initializeMap() {
+        GLint defaultMap[TILEMAP_HEIGHT][TILEMAP_WIDTH] = {
+            {1, 1, 4},
+            {4, 1, 4},
+            {4, 4, 1},
+        };
+
+        for (int i = 0; i < TILEMAP_HEIGHT; i++) {
+            for (int j = 0; j < TILEMAP_WIDTH; j++) {
+                map[i][j] = defaultMap[i][j];
+            }
+        }
+    }
+
+    GLuint setupTile(int nTiles, float &ds, float &dt) {
+        ds = 1.0f / static_cast<float>(nTiles);
+        dt = 1.0f;
+
+        float th = 1.0, tw = 1.0;
+
+        GLfloat vertices[] = {
+            // x       y       z    s       t
+            0.0f, th / 2.0f, 0.0f, 0.0f, dt / 2.0f, // A (topo)
+            tw / 2.0f, th, 0.0f, ds / 2.0f, dt, // B (direita)
+            tw / 2.0f, 0.0f, 0.0f, ds / 2.0f, 0.0f, // D (base)
+            tw, th / 2.0f, 0.0f, ds, dt / 2.0f // C (esquerda)
+        };
+
+
+        GLuint VBO, VAO;
+        glGenVertexArrays(1, &VAO);
+        glGenBuffers(1, &VBO);
+
+        glBindVertexArray(VAO);
+
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *) 0);
+        glEnableVertexAttribArray(0);
+
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *) (3 * sizeof(GLfloat)));
+        glEnableVertexAttribArray(1);
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+
+        return VAO;
+    }
+
+    GLuint loadTexture(const string &path, int &width, int &height) {
+        GLuint textureID;
+        glGenTextures(1, &textureID);
+        glBindTexture(GL_TEXTURE_2D, textureID);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        int nrChannels;
+        unsigned char *data = stbi_load(path.c_str(), &width, &height, &nrChannels, 0);
+        if (data) {
+            GLenum format = (nrChannels == 3) ? GL_RGB : GL_RGBA;
+            glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            cout << "Texture loaded successfully: " << path << " (" << width << "x" << height << ")" << endl;
+        } else {
+            cerr << "Failed to load texture: " << path << endl;
+            cerr << "STB Error: " << stbi_failure_reason() << endl;
+            throw runtime_error("Falha ao carregar a imagem " + path);
+        }
+
+        stbi_image_free(data);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        return textureID;
+    }
+};
+
+class Player {
+private:
+    vec2 position;
+    const TileMap &tileMap;
+
+public:
+    Player(const TileMap &map) : tileMap(map), position(0, 0) {
+    }
+
+    GLvoid handleInput(int key, int action) {
+        if (action != GLFW_PRESS) return;
+
+        vec2 aux = position;
+
+        switch (key) {
+            case GLFW_KEY_W:
+                if (position.x > 0) position.x--;
+                if (position.y > 0) position.y--;
+                break;
+            case GLFW_KEY_A:
+                if (position.x > 0) position.x--;
+                if (position.y <= tileMap.getHeight() - 2) position.y++;
+                break;
+            case GLFW_KEY_S:
+                if (position.x <= tileMap.getWidth() - 2) position.x++;
+                if (position.y <= tileMap.getHeight() - 2) position.y++;
+                break;
+            case GLFW_KEY_D:
+                if (position.x <= tileMap.getWidth() - 2) position.x++;
+                if (position.y > 0) position.y--;
+                break;
+            case GLFW_KEY_Q:
+                if (position.x > 0) position.x--;
+                break;
+            case GLFW_KEY_E:
+                if (position.y > 0) position.y--;
+                break;
+            case GLFW_KEY_Z:
+                if (position.y <= tileMap.getHeight() - 2) position.y++;
+                break;
+            case GLFW_KEY_X:
+                if (position.x <= tileMap.getWidth() - 2) position.x++;
+                break;
+        }
+
+        if (!tileMap.getTileset()[tileMap[(int) position.y][(int) position.x]].caminhavel) {
+            position = aux;
+        }
+    }
+
+    GLvoid draw(const Shader &shader) const {
+        Tile current_tile = tileMap.getTileset()[6];
+
+        GLfloat x0 = 400.0f;
+        GLfloat y0 = 100.0f;
+
+        GLfloat x = x0 + (position.x - position.y) * current_tile.dimensions.x / 2.0f;
+        GLfloat y = y0 + (position.x + position.y) * current_tile.dimensions.y / 2.0f;
+
+        mat4 model = mat4(1.0f);
+        model = translate(model, vec3(x, y, 0.0f));
+        model = scale(model, current_tile.dimensions);
+        shader.setMat4("model", model);
+
+        vec2 offsetTex;
+        offsetTex.s = current_tile.iTile * current_tile.ds;
+        offsetTex.t = 0.0f;
+        glUniform2f(glGetUniformLocation(shader.getProgram(), "offsetTex"), offsetTex.s, offsetTex.t);
+
+        glBindVertexArray(current_tile.VAO);
+        glBindTexture(GL_TEXTURE_2D, current_tile.texID);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+};
+
+class main {
+private:
+    Window window;
+    Shader shader;
+    TileMap tileMap;
+    Player player;
+
+public:
+    main(): window(800, 600, "Game"),
+            shader("shaders/vertex.vert", "shaders/fragment.frag"),
+            tileMap("assets/tilesetIso.png"),
+            player(tileMap) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        shader.use();
+
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(glGetUniformLocation(shader.getProgram(), "tex_buff"), 0);
+
+        mat4 projection = ortho(0.0f, 800.0f, 600.0f, 0.0f, -1.0f, 1.0f);
+        shader.setMat4("projection", projection);
+    }
+
+    void run() {
+        double lastTime = glfwGetTime();
+        const double targetFPS = 60.0;
+        const double frameTime = 1.0 / targetFPS;
+
+        while (!window.shouldClose()) {
+            double currentTime = glfwGetTime();
+            double deltaTime = currentTime - lastTime;
+            if (deltaTime >= frameTime) {
+                exitGame(window);
+                render();
+                window.swapBuffers();
+                glfwPollEvents();
+                lastTime = currentTime;
+            }
+        }
+    }
+
+private:
+    GLvoid render() {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        shader.use();
+        glUniform1i(glGetUniformLocation(shader.getProgram(), "tex_buff"), 0);
+        tileMap.draw(shader);
+        player.draw(shader);
+    }
+
+    GLvoid exitGame(Window &window) {
+        if (glfwGetKey(window.getHandle(), GLFW_KEY_ESCAPE) == GLFW_PRESS)
+            glfwSetWindowShouldClose(window.getHandle(), true);
+    }
+};
 
 int main() {
-	glfwInit();
+    try {
+        main game;
+        game.run();
+    } catch (const exception &e) {
+        cerr << "ERROR: " << e.what() << endl;
+        return -1;
+    }
 
-	glfwWindowHint(GLFW_SAMPLES, 8);
-
-	GLFWwindow *window = glfwCreateWindow(WIDTH, HEIGHT, "Ola Triangulo! -- Rossana", nullptr, nullptr);
-	if (!window)
-	{
-		std::cerr << "Falha ao criar a janela GLFW" << std::endl;
-		glfwTerminate();
-		return -1;
-	}
-	glfwMakeContextCurrent(window);
-
-	glfwSetKeyCallback(window, key_callback);
-
-	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-	{
-		std::cerr << "Falha ao inicializar GLAD" << std::endl;
-		return -1;
-	}
-
-	const GLubyte *renderer = glGetString(GL_RENDERER); /* get renderer string */
-	const GLubyte *version = glGetString(GL_VERSION);	/* version as a string */
-	cout << "Renderer: " << renderer << endl;
-	cout << "OpenGL version supported " << version << endl;
-
-	int width, height;
-	glfwGetFramebufferSize(window, &width, &height);
-	glViewport(0, 0, width, height);
-
-	GLuint shaderID = setupShader();
-
-	int imgWidth, imgHeight;
-	GLuint texID = loadTexture("../assets/tilesets/tilesetIso.png",imgWidth,imgHeight);
-
-	for (int i=0; i < 7; i++)
-	{
-		Tile tile;
-		tile.dimensions = vec3(114,57,1.0);
-		tile.iTile = i;
-		tile.texID = texID;
-		tile.VAO = setupTile(7,tile.ds,tile.dt);
-		tile.caminhavel = true;
-		tileset.push_back(tile);
-	}
-
-	tileset[4].caminhavel = false; //agua
-
-	pos.x = 0;
-	pos.y = 0;
-
-
-
-	glUseProgram(shaderID);
-
-	double prev_s = glfwGetTime();
-	double title_countdown_s = 0.1;
-
-	float colorValue = 0.0;
-
-	glActiveTexture(GL_TEXTURE0);
-
-	glUniform1i(glGetUniformLocation(shaderID, "tex_buff"), 0);
-
-	mat4 projection = ortho(0.0, 800.0, 600.0, 0.0, -1.0, 1.0);
-	glUniformMatrix4fv(glGetUniformLocation(shaderID, "projection"), 1, GL_FALSE, value_ptr(projection));
-
-	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_ALWAYS);
-
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-
-	double lastTime = 0.0;
-	double deltaT = 0.0;
-	double currTime = glfwGetTime();
-	double FPS = 12.0;
-
-	while (!glfwWindowShouldClose(window))
-	{
-		{
-			double curr_s = glfwGetTime();
-			double elapsed_s = curr_s - prev_s;
-			prev_s = curr_s;
-
-			title_countdown_s -= elapsed_s;
-			if (title_countdown_s <= 0.0 && elapsed_s > 0.0)
-			{
-				double fps = 1.0 / elapsed_s;
-
-				char tmp[256];
-				sprintf(tmp, "Ola Triangulo! -- Rossana\tFPS %.2lf", fps);
-				glfwSetWindowTitle(window, tmp);
-
-				title_countdown_s = 0.1;
-			}
-		}
-
-		glfwPollEvents();
-
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-		glLineWidth(10);
-		glPointSize(20);
-
-		desenharMapa(shaderID);
-		desenharPersonagem(shaderID);
-
-		glfwSwapBuffers(window);
-	}
-
-	glfwTerminate();
-	return 0;
+    return 0;
 }
-
-
-void key_callback(GLFWwindow *window, int key, int scancode, int action, int mode)
-{
-	if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-		glfwSetWindowShouldClose(window, GL_TRUE);
-
-	vec2 aux = pos;
-
-	if (key == GLFW_KEY_W && action == GLFW_PRESS) // NORTE
-	{
-		if (pos.x > 0)
-		{
-			pos.x--;
-		}
-
-		if (pos.y > 0)
-		{
-			pos.y--;
-		}
-
-
-	}
-	if (key == GLFW_KEY_A && action == GLFW_PRESS) // OESTE
-	{
-		if (pos.x > 0)
-		{
-			pos.x--;
-		}
-		if (pos.y <= TILEMAP_HEIGHT - 2)
-		{
-			pos.y++;
-		}
-
-
-	}
-	if (key == GLFW_KEY_S && action == GLFW_PRESS) // SUL
-	{
-		if (pos.x <= TILEMAP_WIDTH -2)
-		{
-			pos.x++;
-		}
-
-		if (pos.y <= TILEMAP_HEIGHT - 2)
-		{
-			pos.y++;
-		}
-
-	}
-	if (key == GLFW_KEY_D && action == GLFW_PRESS) // LESTE
-	{
-		if (pos.x <= TILEMAP_WIDTH -2)
-		{
-			pos.x++;
-		}
-
-		if (pos.y > 0)
-		{
-			pos.y--;
-		}
-
-	}
-	if (key == GLFW_KEY_Q && action == GLFW_PRESS) //NOROESTE
-	{
-		if (pos.x > 0)
-		{
-			pos.x--;
-		}
-
-	}
-	if (key == GLFW_KEY_E && action == GLFW_PRESS) //NORDESTE
-	{
-		if (pos.y > 0)
-		{
-			pos.y--;
-		}
-
-	}
-	if (key == GLFW_KEY_Z && action == GLFW_PRESS) //SUDOESTE
-	{
-		if (pos.y <= TILEMAP_HEIGHT - 2)
-		{
-			pos.y++;
-		}
-
-	}
-	if (key == GLFW_KEY_X && action == GLFW_PRESS) //SUDESTE
-	{
-		if (pos.x <= TILEMAP_WIDTH -2)
-		{
-			pos.x++;
-		}
-
-	}
-
-	if (!tileset[map[(int)pos.y][(int)pos.x]].caminhavel)
-	{
-		pos = aux; //recebe a pos não mudada :P
-	}
-
-	cout << "(" << pos.x <<"," << pos.y << ")" << endl;
-
-}
-
-int setupShader()
-{
-	// Vertex shader
-	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-	glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
-	glCompileShader(vertexShader);
-	// Checando erros de compilação (exibição via log no terminal)
-	GLint success;
-	GLchar infoLog[512];
-	glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
-	if (!success)
-	{
-		glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
-		std::cout << "ERROR::SHADER::VERTEX::COMPILATION_FAILED\n"
-				  << infoLog << std::endl;
-	}
-	// Fragment shader
-	GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
-	glCompileShader(fragmentShader);
-	// Checando erros de compilação (exibição via log no terminal)
-	glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
-	if (!success)
-	{
-		glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
-		std::cout << "ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n"
-				  << infoLog << std::endl;
-	}
-	// Linkando os shaders e criando o identificador do programa de shader
-	GLuint shaderProgram = glCreateProgram();
-	glAttachShader(shaderProgram, vertexShader);
-	glAttachShader(shaderProgram, fragmentShader);
-	glLinkProgram(shaderProgram);
-	// Checando por erros de linkagem
-	glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-	if (!success)
-	{
-		glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
-		std::cout << "ERROR::SHADER::PROGRAM::LINKING_FAILED\n"
-				  << infoLog << std::endl;
-	}
-	glDeleteShader(vertexShader);
-	glDeleteShader(fragmentShader);
-
-	return shaderProgram;
-}
-
-
-int setupSprite(int nAnimations, int nFrames, float &ds, float &dt)
-{
-
-	ds = 1.0 / (float) nFrames;
-	dt = 1.0 / (float) nAnimations;
-	// Aqui setamos as coordenadas x, y e z do triângulo e as armazenamos de forma
-	// sequencial, já visando mandar para o VBO (Vertex Buffer Objects)
-	// Cada atributo do vértice (coordenada, cores, coordenadas de textura, normal, etc)
-	// Pode ser arazenado em um VBO único ou em VBOs separados
-	GLfloat vertices[] = {
-		// x   y    z    s     t
-		-0.5,  0.5, 0.0, 0.0, dt, //V0
-		-0.5, -0.5, 0.0, 0.0, 0.0, //V1
-		 0.5,  0.5, 0.0, ds, dt, //V2
-		 0.5, -0.5, 0.0, ds, 0.0  //V3
-		};
-
-	GLuint VBO, VAO;
-	// Geração do identificador do VBO
-	glGenBuffers(1, &VBO);
-	// Faz a conexão (vincula) do buffer como um buffer de array
-	glBindBuffer(GL_ARRAY_BUFFER, VBO);
-	// Envia os dados do array de floats para o buffer da OpenGl
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-	// Geração do identificador do VAO (Vertex Array Object)
-	glGenVertexArrays(1, &VAO);
-	// Vincula (bind) o VAO primeiro, e em seguida  conecta e seta o(s) buffer(s) de vértices
-	// e os ponteiros para os atributos
-	glBindVertexArray(VAO);
-	// Para cada atributo do vertice, criamos um "AttribPointer" (ponteiro para o atributo), indicando:
-	//  Localização no shader * (a localização dos atributos devem ser correspondentes no layout especificado no vertex shader)
-	//  Numero de valores que o atributo tem (por ex, 3 coordenadas xyz)
-	//  Tipo do dado
-	//  Se está normalizado (entre zero e um)
-	//  Tamanho em bytes
-	//  Deslocamento a partir do byte zero
-
-	// Ponteiro pro atributo 0 - Posição - coordenadas x, y, z
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *)0);
-	glEnableVertexAttribArray(0);
-
-	// Ponteiro pro atributo 1 - Coordenada de textura s, t
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *)(3 * sizeof(GLfloat)));
-	glEnableVertexAttribArray(1);
-
-	// Observe que isso é permitido, a chamada para glVertexAttribPointer registrou o VBO como o objeto de buffer de vértice
-	// atualmente vinculado - para que depois possamos desvincular com segurança
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-	// Desvincula o VAO (é uma boa prática desvincular qualquer buffer ou array para evitar bugs medonhos)
-	glBindVertexArray(0);
-
-	return VAO;
-}
-
-int setupTile(int nTiles, float &ds, float &dt)
-{
-
-	ds = 1.0 / (float) nTiles;
-	dt = 1.0;
-
-	// Como eu prefiro escalar depois, th e tw serão 1.0
-	float th = 1.0, tw = 1.0;
-
-	GLfloat vertices[] = {
-		// x   y    z    s     t
-		0.0,  th/2.0f,   0.0, 0.0,    dt/2.0f, //A
-		tw/2.0f, th,     0.0, ds/2.0f, dt,     //B
-		tw/2.0f, 0.0,    0.0, ds/2.0f, 0.0,    //D
-		tw,     th/2.0f, 0.0, ds,     dt/2.0f  //C
-		};
-
-	GLuint VBO, VAO;
-	// Geração do identificador do VBO
-	glGenBuffers(1, &VBO);
-	// Faz a conexão (vincula) do buffer como um buffer de array
-	glBindBuffer(GL_ARRAY_BUFFER, VBO);
-	// Envia os dados do array de floats para o buffer da OpenGl
-	glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-	// Geração do identificador do VAO (Vertex Array Object)
-	glGenVertexArrays(1, &VAO);
-	// Vincula (bind) o VAO primeiro, e em seguida  conecta e seta o(s) buffer(s) de vértices
-	// e os ponteiros para os atributos
-	glBindVertexArray(VAO);
-	// Para cada atributo do vertice, criamos um "AttribPointer" (ponteiro para o atributo), indicando:
-	//  Localização no shader * (a localização dos atributos devem ser correspondentes no layout especificado no vertex shader)
-	//  Numero de valores que o atributo tem (por ex, 3 coordenadas xyz)
-	//  Tipo do dado
-	//  Se está normalizado (entre zero e um)
-	//  Tamanho em bytes
-	//  Deslocamento a partir do byte zero
-
-	// Ponteiro pro atributo 0 - Posição - coordenadas x, y, z
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *)0);
-	glEnableVertexAttribArray(0);
-
-	// Ponteiro pro atributo 1 - Coordenada de textura s, t
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), (GLvoid *)(3 * sizeof(GLfloat)));
-	glEnableVertexAttribArray(1);
-
-	// Observe que isso é permitido, a chamada para glVertexAttribPointer registrou o VBO como o objeto de buffer de vértice
-	// atualmente vinculado - para que depois possamos desvincular com segurança
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-	// Desvincula o VAO (é uma boa prática desvincular qualquer buffer ou array para evitar bugs medonhos)
-	glBindVertexArray(0);
-
-	return VAO;
-}
-
-int loadTexture(string filePath, int &width, int &height)
-{
-	GLuint texID;
-
-	// Gera o identificador da textura na memória
-	glGenTextures(1, &texID);
-	glBindTexture(GL_TEXTURE_2D, texID);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-	int nrChannels;
-
-	unsigned char *data = stbi_load(filePath.c_str(), &width, &height, &nrChannels, 0);
-
-	if (data)
-	{
-		if (nrChannels == 3) // jpg, bmp
-		{
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
-		}
-		else // png
-		{
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-		}
-		glGenerateMipmap(GL_TEXTURE_2D);
-	}
-	else
-	{
-		std::cout << "Failed to load texture" << std::endl;
-	}
-
-	stbi_image_free(data);
-
-	glBindTexture(GL_TEXTURE_2D, 0);
-
-	return texID;
-}
-
-void desenharMapa(GLuint shaderID)
-{
-	//dá pra fazer um cálculo usando tilemap_width e tilemap_height
-	float x0 = 400;
-	float y0 = 100;
-
-	for(int i=0; i<TILEMAP_HEIGHT; i++)
-	{
-		for (int j=0; j < TILEMAP_WIDTH; j++)
-		{
-			// Matriz de transformaçao do objeto - Matriz de modelo
-			mat4 model = mat4(1); //matriz identidade
-
-			Tile curr_tile = tileset[map[i][j]];
-
-			float x = x0 + (j-i) * curr_tile.dimensions.x/2.0;
-			float y = y0 + (j+i) * curr_tile.dimensions.y/2.0;
-
-			model = translate(model, vec3(x,y,0.0));
-			model = scale(model,curr_tile.dimensions);
-			glUniformMatrix4fv(glGetUniformLocation(shaderID, "model"), 1, GL_FALSE, value_ptr(model));
-
-		vec2 offsetTex;
-
-		offsetTex.s = curr_tile.iTile * curr_tile.ds;
-		offsetTex.t = 0.0;
-		glUniform2f(glGetUniformLocation(shaderID, "offsetTex"),offsetTex.s, offsetTex.t);
-
-		glBindVertexArray(curr_tile.VAO); // Conectando ao buffer de geometria
-		glBindTexture(GL_TEXTURE_2D, curr_tile.texID); // Conectando ao buffer de textura
-
-		// Chamada de desenho - drawcall
-		// Poligono Preenchido - GL_TRIANGLES
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-		}
-	}
-}
-
-void desenharPersonagem(GLuint shaderID)
-{
-	Tile curr_tile = tileset[6]; //tile rosa
-
-	float x0 = 400;
-	float y0 = 100;
-
-	float x = x0 + (pos.x-pos.y) * curr_tile.dimensions.x/2.0;
-	float y = y0 + (pos.x+pos.y) * curr_tile.dimensions.y/2.0;
-
-	mat4 model = mat4(1);
-	model = translate(model, vec3(x,y,0.0));
-	model = scale(model,curr_tile.dimensions);
-	glUniformMatrix4fv(glGetUniformLocation(shaderID, "model"), 1, GL_FALSE, value_ptr(model));
-
-	vec2 offsetTex;
-
-	offsetTex.s = curr_tile.iTile * curr_tile.ds;
-	offsetTex.t = 0.0;
-	glUniform2f(glGetUniformLocation(shaderID, "offsetTex"),offsetTex.s, offsetTex.t);
-
-	glBindVertexArray(curr_tile.VAO); // Conectando ao buffer de geometria
-	glBindTexture(GL_TEXTURE_2D, curr_tile.texID); // Conectando ao buffer de textura
-
-	// Chamada de desenho - drawcall
-	// Poligono Preenchido - GL_TRIANGLES
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
-
-
-
-

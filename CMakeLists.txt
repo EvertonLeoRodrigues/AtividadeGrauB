@@ -16,8 +16,7 @@ set(CMAKE_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(CMAKE_ASSETS_DIR ${CMAKE_SOURCE_DIR}/assets)
 set(GLAD_C_FILE ${CMAKE_SOURCE_DIR}/include/glad/glad.c)
 
-add_executable(GBatividade main.cpp ${GLAD_C_FILE}
-        game.cpp)
+add_executable(GBatividade main.cpp ${GLAD_C_FILE})
 
 target_include_directories(GBatividade PRIVATE ${CMAKE_INCLUDE_DIR} ${CMAKE_ASSETS_DIR})
 
