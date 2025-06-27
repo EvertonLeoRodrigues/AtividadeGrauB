@@ -347,42 +347,28 @@ public:
     }
 
     GLvoid handleInput(int key, int action) {
-        if (action != GLFW_PRESS) return;
-
         vec2 aux = position;
 
-        switch (key) {
-            case GLFW_KEY_W:
-                if (position.x > 0) position.x--;
-                if (position.y > 0) position.y--;
-                break;
-            case GLFW_KEY_A:
-                if (position.x > 0) position.x--;
-                if (position.y <= tileMap.getHeight() - 2) position.y++;
-                break;
-            case GLFW_KEY_S:
-                if (position.x <= tileMap.getWidth() - 2) position.x++;
-                if (position.y <= tileMap.getHeight() - 2) position.y++;
-                break;
-            case GLFW_KEY_D:
-                if (position.x <= tileMap.getWidth() - 2) position.x++;
-                if (position.y > 0) position.y--;
-                break;
-            case GLFW_KEY_Q:
-                if (position.x > 0) position.x--;
-                break;
-            case GLFW_KEY_E:
-                if (position.y > 0) position.y--;
-                break;
-            case GLFW_KEY_Z:
-                if (position.y <= tileMap.getHeight() - 2) position.y++;
-                break;
-            case GLFW_KEY_X:
-                if (position.x <= tileMap.getWidth() - 2) position.x++;
-                break;
+        if (key == GLFW_KEY_W && action == GLFW_PRESS) {
+            if (position.x > 0) position.x--;
+            if (position.y > 0) position.y--;
+        }
+        if (key == GLFW_KEY_A && action == GLFW_PRESS) {
+            if (position.x > 0) position.x--;
+            if (position.y <= tileMap.getHeight() - 2) position.y++;
+        }
+        if (key == GLFW_KEY_S && action == GLFW_PRESS) {
+            if (position.x <= tileMap.getWidth() - 2) position.x++;
+            if (position.y <= tileMap.getHeight() - 2) position.y++;
+        }
+        if (key == GLFW_KEY_D && action == GLFW_PRESS) {
+            if (position.x <= tileMap.getWidth() - 2) position.x++;
+            if (position.y > 0) position.y--;
         }
 
-        if (!tileMap.getTileset()[tileMap[(int) position.y][(int) position.x]].caminhavel) {
+        int x = static_cast<int>(position.x);
+        int y = static_cast<int>(position.y);
+        if (!tileMap.isWalkable(x, y)) {
             position = aux;
         }
     }
@@ -412,7 +398,7 @@ public:
     }
 };
 
-class main {
+class Game {
 private:
     Window window;
     Shader shader;
@@ -420,7 +406,7 @@ private:
     Player player;
 
 public:
-    main(): window(800, 600, "Game"),
+    Game(): window(800, 600, "Game"),
             shader("shaders/vertex.vert", "shaders/fragment.frag"),
             tileMap("assets/tilesetIso.png"),
             player(tileMap) {
@@ -436,6 +422,16 @@ public:
 
         mat4 projection = ortho(0.0f, 800.0f, 600.0f, 0.0f, -1.0f, 1.0f);
         shader.setMat4("projection", projection);
+
+        glfwSetWindowUserPointer(window.getHandle(), this);
+        glfwSetKeyCallback(window.getHandle(), &Game::keyCallback);
+    }
+
+    static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods) {
+        Game *game = static_cast<Game *>(glfwGetWindowUserPointer(window));
+        if (game) {
+            game->player.handleInput(key, action);
+        }
     }
 
     void run() {
@@ -450,9 +446,9 @@ public:
                 exitGame(window);
                 render();
                 window.swapBuffers();
-                glfwPollEvents();
                 lastTime = currentTime;
             }
+            glfwPollEvents();
         }
     }
 
@@ -475,7 +471,7 @@ private:
 
 int main() {
     try {
-        main game;
+        Game game;
         game.run();
     } catch (const exception &e) {
         cerr << "ERROR: " << e.what() << endl;
